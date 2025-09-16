@@ -1,0 +1,214 @@
+ Drop tables if they exist to start with a clean slate
+DROP TABLE IF EXISTS sales_fact;
+DROP TABLE IF EXISTS products_dim;
+
+-- Create the products dimension table
+CREATE TABLE products_dim (
+    product_id VARCHAR(50) PRIMARY KEY,
+    product_name VARCHAR(255),
+    category VARCHAR(100),
+    subcategory VARCHAR(100),
+    stocklevel INTEGER
+);
+
+-- Create the sales fact table
+CREATE TABLE sales_fact (
+    order_id VARCHAR(50) PRIMARY KEY,
+    product_id VARCHAR(50) REFERENCES products_dim(product_id),
+    quantity_sold INTEGER,
+    sale_date DATE
+);
+
+-- Populate the products_dim table with some sample data and initial stock levels
+INSERT INTO products_dim (product_id, product_name, category, subcategory, stocklevel) VALUES
+('OFF-PA-10001970', 'Easy-staple paper', 'Office Supplies', 'Paper', 50),
+('FUR-CH-10000454', 'Hon Deluxe Fabric Upholstered Stacking Chairs', 'Furniture', 'Chairs', 10),
+('TEC-AC-10003399', 'Memorex Mini Travel Drive 64 GB USB 2.0 Flash Drive', 'Technology', 'Accessories', 25);
+
+CREATE OR REPLACE FUNCTION stocklevel_trigger_function()
+RETURNS TRIGGER AS $$
+DECLARE
+    current_stock INTEGER;
+BEGIN
+    -- Get the current stock level for the product being sold
+    SELECT stocklevel INTO current_stock
+    FROM products_dim
+    WHERE product_id = NEW.product_id;
+
+    -- Check if there is enough stock to fulfill the order
+    IF current_stock >= NEW.quantity_sold THEN
+        -- If stock is sufficient, update the stock level
+        UPDATE products_dim
+        SET stocklevel = stocklevel - NEW.quantity_sold
+        WHERE product_id = NEW.product_id;
+        
+        -- Allow the INSERT to proceed
+        RETURN NEW;
+    ELSE
+        -- If stock is insufficient, raise an exception to prevent the transaction
+        RAISE EXCEPTION 'Insufficient stock for product %! Current stock: %, Order quantity: %',
+            NEW.product_id, current_stock, NEW.quantity_sold;
+        
+        -- The transaction is rolled back, so no data is inserted
+        RETURN NULL;
+    END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Initial stock level for the product
+SELECT * FROM products_dim WHERE product_id = 'OFF-PA-10001970';
+
+-- Fictitious transaction: Insert a new sales record
+INSERT INTO sales_fact (order_id, product_id, quantity_sold, sale_date) VALUES
+('CA-2016-152156', 'OFF-PA-10001970', 5, '2016-11-08');
+
+-- Check the updated stock level for the product
+SELECT * FROM products_dim WHERE product_id = 'OFF-PA-10001970';
+
+UPDATE products_dim
+SET stocklevel = 50 -- Or any number greater than 30
+WHERE product_id = 'FUR-CH-10000454';
+
+-- Drop the dependent table first to avoid errors
+DROP TABLE IF EXISTS sales_fact;
+
+-- Now drop the parent table
+DROP TABLE IF EXISTS products_dim;
+
+-- Create the products dimension table with a 'Cost' column
+CREATE TABLE products_dim (
+    product_id VARCHAR(50) PRIMARY KEY,
+    product_name VARCHAR(255),
+    cost NUMERIC(10, 2)
+);
+
+-- Create the orders fact table with a 'Profit' column
+CREATE TABLE "Order_Facts" (
+    order_id VARCHAR(50) PRIMARY KEY,
+    product_id VARCHAR(50) REFERENCES products_dim(product_id),
+    sales NUMERIC(10, 2),
+    quantity INTEGER,
+    discount NUMERIC(4, 2),
+    profit NUMERIC(10, 2)
+);
+
+-- Populate the products_dim table with sample data and a fictious 'Cost' value for each product
+INSERT INTO products_dim (product_id, product_name, cost) VALUES
+('FUR-CH-10000454', 'Hon Deluxe Fabric Upholstered Stacking Chairs', 50.00),
+('OFF-LA-10000240', 'Self-Adhesive Removable Labels', 2.00),
+('TEC-PH-10004006', 'Panasonic KX - TS880B Telephone', 35.00);
+
+CREATE OR REPLACE FUNCTION calculate_profit_trigger_function()
+RETURNS TRIGGER AS $$
+DECLARE
+    product_cost NUMERIC(10, 2);
+BEGIN
+    -- Look up the cost of the product from the products_dim table
+    SELECT cost INTO product_cost
+    FROM products_dim
+    WHERE product_id = NEW.product_id;
+
+    -- Calculate the profit and assign it to the NEW.profit field
+    NEW.profit := NEW.sales - (NEW.sales * NEW.discount) - (NEW.quantity * product_cost);
+    
+    -- Return the new row with the calculated profit
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER calculate_profit_trigger
+BEFORE INSERT ON "Order_Facts"
+FOR EACH ROW
+EXECUTE FUNCTION calculate_profit_trigger_function();
+
+-- Demonstrate the trigger by inserting a new sales record without a profit value
+-- Order_ID, Product_ID, Sales, Quantity, Discount
+INSERT INTO "Order_Facts" (order_id, product_id, sales, quantity, discount) VALUES
+('CA-2016-138688', 'TEC-PH-10004006', 206.10, 5, 0);
+
+-- Verify that the profit was correctly calculated and populated
+SELECT * FROM "Order_Facts" WHERE order_id = 'CA-2016-138688';
+
+-- Demonstrate the trigger by inserting a new sales record without a profit value
+-- Order_ID, Product_ID, Sales, Quantity, Discount
+INSERT INTO "Order_Facts" (order_id, product_id, sales, quantity, discount) VALUES
+('CA-2016-138688', 'TEC-PH-10004006', 206.10, 5, 0);
+
+-- Verify that the profit was correctly calculated and populated
+SELECT * FROM "Order_Facts" WHERE order_id = 'CA-2016-138688';
+
+-- Drop tables if they exist to start with a clean slate
+DROP TABLE IF EXISTS "Returns";
+DROP TABLE IF EXISTS "Orders";
+
+-- Create the Orders table with OrderStatus column
+CREATE TABLE "Orders" (
+    order_id VARCHAR(50) PRIMARY KEY,
+    quantity_ordered INTEGER,
+    order_status VARCHAR(50)
+);
+
+-- Create the Returns table with a foreign key to Orders
+CREATE TABLE "Returns" (
+    return_id SERIAL PRIMARY KEY,
+    order_id VARCHAR(50) REFERENCES "Orders"(order_id),
+    quantity_returned INTEGER
+);
+
+-- Insert a sample order with a 'Shipped' status
+INSERT INTO "Orders" (order_id, quantity_ordered, order_status) VALUES
+('CA-2016-152156', 5, 'Shipped');
+
+
+
+SELECT * FROM "Order_Facts" WHERE order_id = 'CA-2016-138688';
+
+
+
+-- Trigger function to check for full return and update order status
+CREATE OR REPLACE FUNCTION update_order_status_on_return()
+RETURNS TRIGGER AS $$
+DECLARE
+    total_returned INTEGER;
+    total_ordered INTEGER;
+BEGIN
+    -- Get the total quantity of items returned for the order
+    SELECT SUM(quantity_returned) INTO total_returned
+    FROM "Returns"
+    WHERE order_id = NEW.order_id;
+    
+    -- Get the total quantity of items originally ordered
+    SELECT quantity_ordered INTO total_ordered
+    FROM "Orders"
+    WHERE order_id = NEW.order_id;
+
+    -- If all items have been returned, update the order status
+    IF total_returned >= total_ordered THEN
+        UPDATE "Orders"
+        SET order_status = 'Returned'
+        WHERE order_id = NEW.order_id;
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Trigger to execute the function AFTER an INSERT on Returns
+CREATE TRIGGER check_full_return_trigger
+AFTER INSERT ON "Returns"
+FOR EACH ROW
+EXECUTE FUNCTION update_order_status_on_return();
+
+
+
+-- Show the initial status of the order
+SELECT order_id, quantity_ordered, order_status FROM "Orders" WHERE order_id = 'CA-2016-152156';
+
+
+
+-- Insert a return for all items in the order
+INSERT INTO "Returns" (order_id, quantity_returned) VALUES
+('CA-2016-152156', 5);
+
+-- Check the updated status of the order after the return
+SELECT order_id, quantity_ordered, order_status FROM "Orders" WHERE order_id = 'CA-2016-152156';
